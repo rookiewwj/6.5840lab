@@ -196,8 +196,10 @@ type AppendEntriesArgs struct {
 
 type AppendEntriesReply struct {
 	// Your data here (3A, 3B).
-	Term    int
-	Success bool
+	Term          int
+	Success       bool
+	ConflictTerm  int
+	ConflictIndex int
 }
 
 // example RequestVote RPC reply structure.
@@ -271,17 +273,37 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if rf.currentTerm < args.Term {
 		rf.currentTerm = args.Term
 		if rf.role == Leader {
-
 			rf.role = Follower
-
 		}
 		rf.votedFor = -1
 	}
 	rf.lastUpdateTime = time.Now()
 	reply.Term = rf.currentTerm
-	if rf.getPrelogIndex() < args.PreLogIndex || rf.getPrelogTerm() != args.PreLogTerm {
 
+	if rf.getPrelogIndex() < args.PreLogIndex || rf.getPrelogTerm() != args.PreLogTerm {
 		reply.Success = false
+
+		// 获取冲突日志的任期
+		if rf.getPrelogIndex() < args.PreLogIndex {
+			// 如果 PreLogIndex 比我们当前的日志索引大，返回当前日志的长度
+			reply.ConflictTerm = -1
+			reply.ConflictIndex = len(rf.logs)
+		} else {
+			// 返回冲突的任期
+			reply.ConflictTerm = rf.logs[args.PreLogIndex].Term
+			// 查找该冲突任期的第一个日志条目索引
+			conflictIdx := 0
+			for j := args.PreLogIndex - 1; j >= 0; j-- {
+				if rf.logs[j].Term != reply.ConflictTerm {
+					conflictIdx = j + 1
+					break
+				}
+			}
+
+			reply.ConflictIndex = conflictIdx
+
+		}
+
 		return
 	}
 
@@ -373,13 +395,23 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // Term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(Command interface{}) (int, int, bool) {
-	index := -1
-	Term := -1
-	isLeader := true
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.role != Leader {
+		return -1, rf.currentTerm, false
+	}
+	newLogEntry := logEntry{
+		Command: Command,
+		Term:    rf.currentTerm,
+	}
+	rf.logs = append(rf.logs, newLogEntry)
+	index := len(rf.logs) - 1
+	Term := rf.currentTerm
 
 	// Your code here (3B).
 
-	return index, Term, isLeader
+	return index, Term, true
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -406,36 +438,110 @@ func (rf *Raft) getPrelogIndex() int {
 }
 
 func (rf *Raft) getPrelogTerm() int {
-	return rf.logs[len(rf.logs)-1].Term
+	if len(rf.logs) > 0 {
+		return rf.logs[len(rf.logs)-1].Term
+	} else {
+		return -1
+	}
+}
+
+func (rf *Raft) genAppendEntriesArgs(serverID int) *AppendEntriesArgs {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	// 确定 PreLogIndex 和 PreLogTerm
+	preLogIndex := rf.nextIndex[serverID] - 1
+	preLogTerm := -1
+	if preLogIndex >= 0 {
+		preLogTerm = rf.logs[preLogIndex].Term
+	}
+
+	args := &AppendEntriesArgs{
+		Term:              rf.currentTerm,
+		LeaderId:          rf.me,
+		PreLogIndex:       preLogIndex,
+		PreLogTerm:        preLogTerm,
+		LeaderCommitIndex: rf.commitIndex,
+		Entries:           rf.logs[rf.nextIndex[serverID]:],
+	}
+	return args
+}
+
+func (rf *Raft) handleAppendReply(serverId int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	ok := rf.sendAppendEntries(serverId, args, reply)
+	if ok {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+		// 1. term 更新
+		// 2. term正常但日志不一致
+		if reply.Term > rf.currentTerm {
+			rf.role = Follower
+			rf.currentTerm = reply.Term
+			rf.votedFor = -1
+			return
+		}
+		// 如果追加日志失败，说明日志冲突
+		if !reply.Success {
+			// 如果跟随者返回了 ConflictTerm 和 ConflictIndex
+			if reply.ConflictTerm != -1 {
+				// 查找Leader日志中 ConflictTerm 的索引
+				conflictIdx := -1
+				for j := len(rf.logs) - 1; j >= 0; j-- {
+					if rf.logs[j].Term == reply.ConflictTerm {
+						conflictIdx = j
+						break
+					}
+				}
+
+				// 如果 Leader 没有 ConflictTerm，直接设置 nextIndex 为 ConflictIndex
+				if conflictIdx == -1 {
+					rf.nextIndex[serverId] = reply.ConflictIndex
+				} else {
+					// 否则，设置 nextIndex 为 Leader 中 ConflictTerm 的最后一个日志的索引+1
+					rf.nextIndex[serverId] = conflictIdx + 1
+				}
+			} else {
+				// 表明follower日志少
+				rf.nextIndex[serverId] = reply.ConflictIndex
+			}
+			return
+		} else {
+			// 如果追加日志成功，更新 matchIndex 和 nextIndex
+			rf.matchIndex[serverId] = args.PreLogIndex + len(args.Entries)
+			rf.nextIndex[serverId] = rf.matchIndex[serverId] + 1
+		}
+
+		// 检测是否有可提交的log
+		n := len(rf.peers)
+
+		for i := len(rf.logs) - 1; i > rf.commitIndex; i-- {
+			count := 1
+
+			for j := 0; j < n; j++ {
+				if rf.matchIndex[j] >= i {
+					count++
+					if count > n/2 {
+						rf.commitIndex = i
+						go rf.applyEntries()
+						break
+					}
+				}
+			}
+		}
+
+	}
 }
 
 func (rf *Raft) heartBeat() {
+	// 心跳
 	for !rf.killed() && rf.checkIdenty(Leader) {
 
 		for i := 0; i < len(rf.peers) && rf.checkIdenty(Leader); i++ {
 			if i != rf.me {
-				args := &AppendEntriesArgs{
-					Term:              rf.currentTerm,
-					LeaderId:          rf.me,
-					PreLogIndex:       rf.getPrelogIndex(),
-					PreLogTerm:        rf.getPrelogTerm(),
-					LeaderCommitIndex: rf.commitIndex,
-				}
+				args := rf.genAppendEntriesArgs(i)
 				reply := &AppendEntriesReply{}
 
-				go func(i int) {
-					ok := rf.sendAppendEntries(i, args, reply)
-					if ok {
-						rf.mu.Lock()
-						if reply.Term > rf.currentTerm {
-
-							rf.role = Follower
-							rf.currentTerm = reply.Term
-						}
-						rf.mu.Unlock()
-					}
-				}(i)
-
+				go rf.handleAppendReply(i, args, reply)
 			}
 		}
 		time.Sleep(heartBeatTime)

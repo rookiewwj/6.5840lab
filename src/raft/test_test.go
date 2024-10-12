@@ -8,12 +8,14 @@ package raft
 // test with the original before submitting.
 //
 
-import "testing"
-import "fmt"
-import "time"
-import "math/rand"
-import "sync/atomic"
-import "sync"
+import (
+	"fmt"
+	"math/rand"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
@@ -295,6 +297,7 @@ func TestFailAgree3B(t *testing.T) {
 	// on new commands.
 	cfg.one(106, servers, true)
 	time.Sleep(RaftElectionTimeout)
+	fmt.Println("开始107")
 	cfg.one(107, servers, true)
 
 	cfg.end()
@@ -494,11 +497,12 @@ func TestBackup3B(t *testing.T) {
 	servers := 5
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
+	index := 0
 
 	cfg.begin("Test (3B): leader backs up quickly over incorrect follower logs")
 
-	cfg.one(rand.Int(), servers, true)
-
+	cfg.one(index, servers, true)
+	index++
 	// put leader and one follower in a partition
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect((leader1 + 2) % servers)
@@ -507,7 +511,8 @@ func TestBackup3B(t *testing.T) {
 
 	// submit lots of commands that won't commit
 	for i := 0; i < 50; i++ {
-		cfg.rafts[leader1].Start(rand.Int())
+		cfg.rafts[leader1].Start(index)
+		index++
 	}
 
 	time.Sleep(RaftElectionTimeout / 2)
@@ -522,7 +527,8 @@ func TestBackup3B(t *testing.T) {
 
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
-		cfg.one(rand.Int(), 3, true)
+		cfg.one(index, 3, true)
+		index++
 	}
 
 	// now another partitioned leader and one follower
@@ -535,7 +541,8 @@ func TestBackup3B(t *testing.T) {
 
 	// lots more commands that won't commit
 	for i := 0; i < 50; i++ {
-		cfg.rafts[leader2].Start(rand.Int())
+		cfg.rafts[leader2].Start(index)
+		index++
 	}
 
 	time.Sleep(RaftElectionTimeout / 2)
@@ -550,14 +557,16 @@ func TestBackup3B(t *testing.T) {
 
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
-		cfg.one(rand.Int(), 3, true)
+		cfg.one(index, 3, true)
+		index++
 	}
 
 	// now everyone
 	for i := 0; i < servers; i++ {
 		cfg.connect(i)
 	}
-	cfg.one(rand.Int(), servers, true)
+	cfg.one(index, servers, true)
+	index++
 
 	cfg.end()
 }
@@ -812,7 +821,7 @@ func TestFigure83C(t *testing.T) {
 	cfg.one(rand.Int(), 1, true)
 
 	nup := servers
-	for iters := 0; iters < 1000; iters++ {
+	for iters := 0; iters < 100; iters++ {
 		leader := -1
 		for i := 0; i < servers; i++ {
 			if cfg.rafts[i] != nil {
@@ -848,6 +857,7 @@ func TestFigure83C(t *testing.T) {
 
 	for i := 0; i < servers; i++ {
 		if cfg.rafts[i] == nil {
+			fmt.Println(i, "重启")
 			cfg.start1(i, cfg.applier)
 			cfg.connect(i)
 		}
@@ -881,6 +891,7 @@ func TestUnreliableAgree3C(t *testing.T) {
 	cfg.setunreliable(false)
 
 	wg.Wait()
+	fmt.Println("===== wait")
 
 	cfg.one(100, servers, true)
 

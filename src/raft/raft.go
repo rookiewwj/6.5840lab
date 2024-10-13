@@ -98,7 +98,9 @@ type Raft struct {
 	matchIndex []int
 
 	// for snap
-	hasCompressLen int
+	lastIncludedIndex int
+	lastIncludedTerm  int
+	snapshot          []byte
 }
 
 func min(a, b int) int {
@@ -120,15 +122,6 @@ func (rf *Raft) GetState() (int, bool) {
 	return Term, isleader
 }
 
-func (rf *Raft) checkIdenty(role Role) bool {
-
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
-	check := (rf.role == role)
-	return check
-}
-
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
@@ -145,12 +138,15 @@ func (rf *Raft) persist() {
 	e.Encode(rf.CurrentTerm)
 	e.Encode(rf.VotedFor)
 	e.Encode(rf.Logs)
+
+	e.Encode(rf.lastIncludedIndex)
+	e.Encode(rf.lastIncludedTerm)
 	raftState := w.Bytes()
-	rf.persister.Save(raftState, nil)
+	rf.persister.Save(raftState, rf.snapshot)
 }
 
 // restore previously persisted state.
-func (rf *Raft) readPersist(data []byte) {
+func (rf *Raft) readPersist(data []byte, snapShot []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
@@ -167,18 +163,32 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
-	var CurrentTerm int
-	var VotedFor int
-	var Logs []logEntry
+
+	var (
+		CurrentTerm       int
+		VotedFor          int
+		Logs              []logEntry
+		LastIncludedIndex int
+		LastIncludedTerm  int
+	)
 
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
-	if d.Decode(&CurrentTerm) != nil || d.Decode(&VotedFor) != nil || d.Decode(&Logs) != nil {
+	if d.Decode(&CurrentTerm) != nil ||
+		d.Decode(&VotedFor) != nil ||
+		d.Decode(&Logs) != nil ||
+		d.Decode(&LastIncludedIndex) != nil ||
+		d.Decode(&LastIncludedTerm) != nil {
+
 		fmt.Println("decode error")
+
 	} else {
 		rf.CurrentTerm = CurrentTerm
 		rf.VotedFor = VotedFor
 		rf.Logs = Logs
+		rf.lastIncludedIndex = LastIncludedIndex
+		rf.lastIncludedTerm = LastIncludedTerm
+		rf.snapshot = snapShot
 	}
 
 }
@@ -189,6 +199,16 @@ func (rf *Raft) readPersist(data []byte) {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	rf.snapshot = snapshot
+	rf.lastIncludedIndex = index
+	rf.lastIncludedTerm = rf.Logs[index].Term
+
+	rf.Logs = rf.Logs[index+1:]
+
+	rf.persist()
 
 }
 
@@ -218,6 +238,18 @@ type AppendEntriesReply struct {
 	Success       bool
 	ConflictTerm  int
 	ConflictIndex int
+}
+
+type InstallSnapshotArgs struct {
+	Term              int
+	LeaderId          int
+	LastIncludedIndex int
+	LastIncludedTerm  int
+	Data              []byte
+}
+
+type InstallSnapshotReply struct {
+	Term int
 }
 
 // example RequestVote RPC reply structure.
@@ -370,6 +402,30 @@ func (rf *Raft) applyEntries() {
 		}
 		rf.applyChan <- applyMsg
 	}
+}
+
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if args.Term < rf.CurrentTerm {
+		reply.Term = rf.CurrentTerm
+		return
+	}
+	if args.Term > rf.CurrentTerm {
+		rf.CurrentTerm = args.Term
+		rf.VotedFor = -1
+		rf.role = Follower
+	}
+
+	rf.snapshot = args.Data
+	rf.lastIncludedIndex = args.LastIncludedIndex
+	rf.lastIncludedTerm = args.LastIncludedTerm
+
+	if len(rf.Logs) {
+
+	}
+
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -759,14 +815,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.role = Follower
 	rf.lastUpdateTime = time.Now() // 记录最后一次收到心跳的时间
 
-	// Snapshot 数据压缩初始化（假设未进行任何压缩）
-	rf.hasCompressLen = 0
-
 	// 初始化 apply channel，用于发送已提交的日志条目给状态机
 	rf.applyChan = applyCh
 
 	// initialize from state persisted before a crash (恢复持久化状态)
-	rf.readPersist(persister.ReadRaftState())
+	rf.readPersist(persister.ReadRaftState(), persister.ReadSnapshot())
 
 	// 启动心跳和选举超时的 ticker goroutine
 	fmt.Println("总共节点数：", len(rf.peers))

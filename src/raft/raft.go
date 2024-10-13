@@ -532,7 +532,7 @@ func (rf *Raft) handleAppendReply(serverId int, args *AppendEntriesArgs, reply *
 		return
 	}
 
-	if rf.CurrentTerm != reply.Term {
+	if rf.CurrentTerm != args.Term {
 		return
 	}
 	fmt.Println(rf.me, "leader logs", rf.Logs)

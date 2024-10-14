@@ -53,7 +53,7 @@ type ApplyMsg struct {
 }
 
 const (
-	eleTimeout    = 250 * time.Millisecond
+	eleTimeout    = 600 * time.Millisecond
 	heartBeatTime = 50 * time.Millisecond
 )
 
@@ -521,14 +521,14 @@ func (rf *Raft) handleAppendReply(serverId int, args *AppendEntriesArgs, reply *
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if !ok {
-		atomic.AddInt64(nfail, 1)
-		var nserver int64 = int64(len(rf.peers))
-		if nserver-*nfail <= nserver/2 {
+		// atomic.AddInt64(nfail, 1)
+		// var nserver int64 = int64(len(rf.peers))
+		// if nserver-*nfail <= nserver/2 {
 
-			rf.role = Follower
-			rf.VotedFor = -1
+		// 	rf.role = Follower
+		// 	rf.VotedFor = -1
 
-		}
+		// }
 		return
 	}
 
@@ -631,7 +631,7 @@ func (rf *Raft) convertToLeader() {
 		rf.matchIndex[i] = 0
 	}
 	// rf.Start(nil)
-	rf.StartWithoutLock(-1)
+	// rf.StartWithoutLock(-1)
 	go rf.heartBeat()
 
 }
@@ -709,7 +709,7 @@ func (rf *Raft) ticker() {
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
 
-		timeout := (rand.Int63() % 150)
+		timeout := (rand.Int63() % 300)
 
 		rf.mu.Lock()
 		lastTime := rf.lastUpdateTime
